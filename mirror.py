@@ -22,15 +22,6 @@ def pp(node):
     """
     return f'{node.displayname} ({node.kind}) [{node.location}]'
 
-def loc(cur, link=True):
-    """
-    Return file location of cursor
-    """
-    if link:
-        return f'{cur.location.file.name}:{cur.location.line}'
-    else:
-        return cur.location.file.name, cur.location.line
-
 def find(node, kind):
     """
     Return all node's descendants of a certain kind
@@ -79,7 +70,7 @@ def main():
     seg_tu = index.parse(seg_c, args=clang_args)
     seg_cur = seg_tu.cursor
     seg_target = select_target(seg_cur, target_name=args.target)
-    parms = find(seg_target, CursorKind.PARM_DECL)
+    parms = list(find(seg_target, CursorKind.PARM_DECL))
 
     log.debug(f'target: {pp(seg_target)}')
     
@@ -89,13 +80,28 @@ def main():
     orig_target = next(filter(lambda f: is_the_same(f, seg_target), orig_funcdecls))
     orig_target_def = orig_target.get_definition()
     first_stmt = next(filter(lambda c: c.kind.is_statement(), orig_target_def.get_children()))
-    first_stmt_file, first_stmt_line = loc(first_stmt, link=False)
+    first_stmt_file, first_stmt_line = first_stmt.location.file.name, first_stmt.location.line
     with open(first_stmt_file, 'r') as f:
         fromlines = f.readlines()
 
+    # TODO: currently searches upward until it hits an empty line. Find a better heuristic
+    funcs_start = orig_target.location.line
+    while fromlines[funcs_start-1].strip() != '':
+        funcs_start -= 1
+
+    log.debug(f'first statement: {first_stmt_file}:{first_stmt_line}, functions will be generated at {first_stmt_file}:{funcs_start}')
+
     arrays = dict(a.split(':') for a in args.array)
-    printfs = list(f'{p}\n' for p in gen_printfs(parms, arrays))
-    tolines = fromlines[:first_stmt_line] + printfs + fromlines[first_stmt_line:]
+    printf_sets = list(gen_printfs(parms, arrays))
+    printfs = []
+    funcs = []
+    for i, s in enumerate(printf_sets):
+        printfs += [f'void print_{parms[i].spelling}({parms[i].type.spelling} {parms[i].spelling})\n']
+        printfs += ['{\n']
+        printfs += (f'{p}\n' for p in s)
+        printfs += ['}\n']
+        funcs += [f'print_{parms[i].spelling}({parms[i].spelling});\n']
+    tolines = fromlines[:funcs_start] + printfs + fromlines[funcs_start:first_stmt_line] + funcs + fromlines[first_stmt_line:]
 
     patchfile = first_stmt_file
     for fi, fp in enumerate(first_stmt_file.split('/'), start=1):
@@ -139,8 +145,9 @@ def gen_printfs(parms, arrays={}):
             t = t.get_canonical()
 
         yield f'// name {name} type kind {t.kind}'
-        log.debug(f'name {name} type kind {t.kind}')
-        log.debug(f'stack: {stack}')
+        if verbose:
+            log.debug(f'name {name} type kind {t.kind}')
+            log.debug(f'stack: {stack}')
 
         if t.kind == TypeKind.INT or \
             t.kind == TypeKind.SHORT or \
@@ -188,7 +195,7 @@ def gen_printfs(parms, arrays={}):
             yield f'// TODO benjis: print {name}'
 
     for p in parms:
-        yield from genny(p.spelling, p.type)
+        yield genny(p.spelling, p.type)
 
 if __name__ == "__main__":
     main()
